@@ -34,6 +34,26 @@ const jobSchema = new mongoose.Schema({
 });
 const Job = mongoose.model("Job", jobSchema);
 
+const applicationSchema = new mongoose.Schema({
+  jobId: { type: mongoose.Schema.Types.ObjectId, ref: "Job", required: true },
+  jobTitle: { type: String, required: true },
+  company: { type: String, required: true },
+  ownerId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+  applicantId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+  name: { type: String, required: true, trim: true, maxlength: 120 },
+  email: { type: String, required: true, trim: true },
+  phone: { type: String, required: true, trim: true, maxlength: 40 },
+  resume: { type: String, default: "", maxlength: 500 },
+  resumeFile: { type: String, default: "" },
+  resumeFileName: { type: String, default: "", maxlength: 200 },
+  message: { type: String, default: "", maxlength: 3000 },
+  status: { type: String, enum: ["Submitted", "Under Review", "Shortlisted", "Interview", "Selected", "Rejected"], default: "Submitted" },
+  createdAt: { type: Number, default: Date.now }
+});
+// Ek applicant ek job par sirf ek baar apply kar sakta hai
+applicationSchema.index({ jobId: 1, applicantId: 1 }, { unique: true });
+const Application = mongoose.model("Application", applicationSchema);
+
 // ---------- Helpers ----------
 function makeToken(user) {
   return jwt.sign({ id: user._id, role: user.role }, JWT_SECRET, { expiresIn: "7d" });
@@ -56,6 +76,26 @@ function publicJob(j) {
     requirements: j.requirements,
     ownerId: String(j.ownerId),
     createdAt: j.createdAt
+  };
+}
+
+function publicApplication(a) {
+  return {
+    id: String(a._id),
+    jobId: String(a.jobId),
+    jobTitle: a.jobTitle,
+    company: a.company,
+    ownerId: String(a.ownerId),
+    applicantId: String(a.applicantId),
+    name: a.name,
+    email: a.email,
+    phone: a.phone,
+    resume: a.resume,
+    resumeFile: a.resumeFile,
+    resumeFileName: a.resumeFileName,
+    message: a.message,
+    status: a.status,
+    createdAt: a.createdAt
   };
 }
 
@@ -140,7 +180,6 @@ app.get("/api/me", auth, async function (req, res) {
 });
 
 // ----- Jobs -----
-// Sab jobs (koi bhi dekh sakta hai)
 app.get("/api/jobs", async function (req, res) {
   try {
     const jobs = await Job.find().sort({ createdAt: -1 });
@@ -151,7 +190,6 @@ app.get("/api/jobs", async function (req, res) {
   }
 });
 
-// Sirf company job post kar sakti hai
 app.post("/api/jobs", auth, onlyRole("company"), async function (req, res) {
   try {
     const b = req.body;
@@ -181,7 +219,6 @@ app.post("/api/jobs", auth, onlyRole("company"), async function (req, res) {
   }
 });
 
-// Company ki apni jobs
 app.get("/api/my-jobs", auth, onlyRole("company"), async function (req, res) {
   try {
     const jobs = await Job.find({ ownerId: req.user.id }).sort({ createdAt: -1 });
@@ -192,7 +229,6 @@ app.get("/api/my-jobs", auth, onlyRole("company"), async function (req, res) {
   }
 });
 
-// Company apni job delete kar sakti hai
 app.delete("/api/jobs/:id", auth, onlyRole("company"), async function (req, res) {
   try {
     const job = await Job.findOne({ _id: req.params.id, ownerId: req.user.id });
@@ -201,6 +237,104 @@ app.delete("/api/jobs/:id", auth, onlyRole("company"), async function (req, res)
     res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: "Invalid job" });
+  }
+});
+
+// ----- Applications -----
+// Sirf applicant apply kar sakta hai, ek job par ek hi baar
+app.post("/api/applications", auth, onlyRole("applicant"), async function (req, res) {
+  try {
+    const b = req.body;
+    if (!mongoose.isValidObjectId(b.jobId)) {
+      return res.status(400).json({ error: "Invalid job" });
+    }
+    const job = await Job.findById(b.jobId);
+    if (!job) return res.status(404).json({ error: "Job not found" });
+
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(401).json({ error: "Account not found" });
+
+    const resumeLink = String(b.resume || "").trim();
+    const resumeFile = String(b.resumeFile || "");
+
+    if (!resumeLink && !resumeFile) {
+      return res.status(400).json({ error: "Please upload a resume or add a resume link" });
+    }
+    if (resumeLink && !/^https?:\/\//i.test(resumeLink)) {
+      return res.status(400).json({ error: "Resume link must start with http:// or https://" });
+    }
+    if (resumeFile && !/^data:/i.test(resumeFile)) {
+      return res.status(400).json({ error: "Invalid resume file" });
+    }
+    if (resumeFile.length > 1000000) {
+      return res.status(400).json({ error: "Resume file is too large (max 700 KB)" });
+    }
+
+    const application = await Application.create({
+      jobId: job._id,
+      jobTitle: job.title,
+      company: job.company,
+      ownerId: job.ownerId,
+      applicantId: user._id,
+      name: clean(b.name),
+      email: user.email,
+      phone: clean(b.phone),
+      resume: resumeLink,
+      resumeFile: resumeFile,
+      resumeFileName: clean(b.resumeFileName),
+      message: clean(b.message)
+    });
+    res.json({ application: publicApplication(application) });
+  } catch (err) {
+    if (err.code === 11000) {
+      return res.status(400).json({ error: "You have already applied for this job" });
+    }
+    console.error(err);
+    if (err.name === "ValidationError") {
+      return res.status(400).json({ error: "Please fill all required fields" });
+    }
+    res.status(500).json({ error: "Could not submit application" });
+  }
+});
+
+// Applicant ki apni applications (resume file ke baghair, list halki rahe)
+app.get("/api/my-applications", auth, onlyRole("applicant"), async function (req, res) {
+  try {
+    const apps = await Application.find({ applicantId: req.user.id })
+      .select("-resumeFile")
+      .sort({ createdAt: -1 });
+    res.json({ applications: apps.map(publicApplication) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Could not load your applications" });
+  }
+});
+
+// Company ke apni jobs ke applicants
+app.get("/api/job-applications", auth, onlyRole("company"), async function (req, res) {
+  try {
+    const apps = await Application.find({ ownerId: req.user.id }).sort({ createdAt: -1 });
+    res.json({ applications: apps.map(publicApplication) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Could not load applications" });
+  }
+});
+
+// Company applicant ka status badal sakti hai (sirf apni jobs ki applications)
+app.patch("/api/applications/:id/status", auth, onlyRole("company"), async function (req, res) {
+  try {
+    const allowed = ["Submitted", "Under Review", "Shortlisted", "Interview", "Selected", "Rejected"];
+    if (allowed.indexOf(req.body.status) === -1) {
+      return res.status(400).json({ error: "Invalid status" });
+    }
+    const app2 = await Application.findOne({ _id: req.params.id, ownerId: req.user.id });
+    if (!app2) return res.status(404).json({ error: "Application not found" });
+    app2.status = req.body.status;
+    await app2.save();
+    res.json({ application: publicApplication(app2) });
+  } catch (err) {
+    res.status(400).json({ error: "Invalid request" });
   }
 });
 
