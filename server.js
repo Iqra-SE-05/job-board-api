@@ -20,6 +20,20 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model("User", userSchema);
 
+const jobSchema = new mongoose.Schema({
+  title: { type: String, required: true, trim: true, maxlength: 120 },
+  company: { type: String, required: true, trim: true, maxlength: 120 },
+  location: { type: String, required: true, trim: true, maxlength: 120 },
+  type: { type: String, required: true, enum: ["Full-time", "Part-time", "Internship", "Contract"] },
+  category: { type: String, required: true, enum: ["IT", "Design", "Marketing", "Finance", "Sales", "Other"] },
+  salary: { type: String, required: true, trim: true, maxlength: 80 },
+  description: { type: String, required: true, trim: true, maxlength: 5000 },
+  requirements: { type: [String], default: [] },
+  ownerId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+  createdAt: { type: Number, default: Date.now }
+});
+const Job = mongoose.model("Job", jobSchema);
+
 // ---------- Helpers ----------
 function makeToken(user) {
   return jwt.sign({ id: user._id, role: user.role }, JWT_SECRET, { expiresIn: "7d" });
@@ -27,6 +41,26 @@ function makeToken(user) {
 
 function publicUser(user) {
   return { id: user._id, name: user.name, email: user.email, role: user.role };
+}
+
+function publicJob(j) {
+  return {
+    id: String(j._id),
+    title: j.title,
+    company: j.company,
+    location: j.location,
+    type: j.type,
+    category: j.category,
+    salary: j.salary,
+    description: j.description,
+    requirements: j.requirements,
+    ownerId: String(j.ownerId),
+    createdAt: j.createdAt
+  };
+}
+
+function clean(text) {
+  return String(text || "").replace(/</g, "&lt;").replace(/>/g, "&gt;").trim();
 }
 
 function auth(req, res, next) {
@@ -41,6 +75,15 @@ function auth(req, res, next) {
   }
 }
 
+function onlyRole(role) {
+  return function (req, res, next) {
+    if (req.user.role !== role) {
+      return res.status(403).json({ error: "Only " + role + " accounts can do this" });
+    }
+    next();
+  };
+}
+
 // ---------- Routes ----------
 app.get("/", function (req, res) {
   res.json({ message: "JobBoard API is running" });
@@ -51,6 +94,7 @@ app.get("/health", function (req, res) {
   res.json({ api: "ok", database: states[mongoose.connection.readyState] });
 });
 
+// ----- Auth -----
 app.post("/api/signup", async function (req, res) {
   try {
     const name = String(req.body.name || "").trim();
@@ -93,6 +137,71 @@ app.get("/api/me", auth, async function (req, res) {
   const user = await User.findById(req.user.id);
   if (!user) return res.status(401).json({ error: "Account not found" });
   res.json({ user: publicUser(user) });
+});
+
+// ----- Jobs -----
+// Sab jobs (koi bhi dekh sakta hai)
+app.get("/api/jobs", async function (req, res) {
+  try {
+    const jobs = await Job.find().sort({ createdAt: -1 });
+    res.json({ jobs: jobs.map(publicJob) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Could not load jobs" });
+  }
+});
+
+// Sirf company job post kar sakti hai
+app.post("/api/jobs", auth, onlyRole("company"), async function (req, res) {
+  try {
+    const b = req.body;
+    const requirements = (Array.isArray(b.requirements) ? b.requirements : [])
+      .map(clean)
+      .filter(Boolean)
+      .slice(0, 30);
+
+    const job = await Job.create({
+      title: clean(b.title),
+      company: clean(b.company),
+      location: clean(b.location),
+      type: b.type,
+      category: b.category,
+      salary: clean(b.salary),
+      description: clean(b.description),
+      requirements: requirements,
+      ownerId: req.user.id
+    });
+    res.json({ job: publicJob(job) });
+  } catch (err) {
+    console.error(err);
+    if (err.name === "ValidationError") {
+      return res.status(400).json({ error: "Please fill all job fields correctly" });
+    }
+    res.status(500).json({ error: "Could not post job" });
+  }
+});
+
+// Company ki apni jobs
+app.get("/api/my-jobs", auth, onlyRole("company"), async function (req, res) {
+  try {
+    const jobs = await Job.find({ ownerId: req.user.id }).sort({ createdAt: -1 });
+    res.json({ jobs: jobs.map(publicJob) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Could not load your jobs" });
+  }
+});
+
+// Company apni job delete kar sakti hai
+app.delete("/api/jobs/:id", auth, onlyRole("company"), async function (req, res) {
+  try {
+    const job = await Job.findOne({ _id: req.params.id, ownerId: req.user.id });
+    if (!job) return res.status(404).json({ error: "Job not found" });
+    await job.deleteOne();
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: "Invalid job" });
+  }
 });
 
 // ---------- Start ----------
